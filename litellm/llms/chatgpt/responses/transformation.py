@@ -51,19 +51,26 @@ class ChatGPTResponsesAPIConfig(OpenAIResponsesAPIConfig):
         model: str,
         litellm_params: GenericLiteLLMParams | None,
     ) -> dict:
+        configured_api_key: Final = litellm_params.api_key if litellm_params else None
+        access_token, account_id = self._resolve_credentials(configured_api_key=configured_api_key, model=model)
+        session_id: Final = ensure_chatgpt_session_id(litellm_params)
+        default_headers: Final = get_chatgpt_default_headers(access_token, account_id, session_id)
+        return {**default_headers, **headers}
+
+    def _resolve_credentials(self, configured_api_key: str | None, model: str) -> tuple[str, str | None]:
+        if configured_api_key and not configured_api_key.endswith(".json"):
+            account_id: Final = self.authenticator.get_account_id(configured_api_key)
+            return configured_api_key, account_id
+        authenticator: Final = Authenticator(auth_file=configured_api_key)
         try:
-            access_token: Final = self.authenticator.get_access_token()
+            access_token: Final = authenticator.get_access_token()
         except GetAccessTokenError as e:
             raise AuthenticationError(
                 model=model,
                 llm_provider="chatgpt",
                 message=str(e),
             )
-
-        account_id: Final = self.authenticator.get_account_id()
-        session_id: Final = ensure_chatgpt_session_id(litellm_params)
-        default_headers: Final = get_chatgpt_default_headers(access_token, account_id, session_id)
-        return {**default_headers, **headers}
+        return access_token, authenticator.get_account_id()
 
     def transform_responses_api_request(
         self,

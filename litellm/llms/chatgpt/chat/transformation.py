@@ -33,9 +33,12 @@ class ChatGPTConfig(OpenAIConfig):
         api_key: str | None,
         custom_llm_provider: str,
     ) -> tuple[str | None, str | None, str]:
-        dynamic_api_base: Final = self.api_base_without_login()
+        dynamic_api_base: Final = self.authenticator.get_api_base()
+        if api_key is None:
+            return dynamic_api_base, None, custom_llm_provider
+        authenticator: Final = Authenticator(auth_file=api_key)
         try:
-            dynamic_api_key: Final = self.authenticator.get_access_token()
+            dynamic_api_key: Final = authenticator.get_access_token()
         except GetAccessTokenError as e:
             raise AuthenticationError(
                 model=model,
@@ -54,14 +57,27 @@ class ChatGPTConfig(OpenAIConfig):
         api_key: str | None = None,
         api_base: str | None = None,
     ) -> dict:
+        dynamic_api_key: Final = self._resolve_access_token(api_key=api_key, model=model)
         validated_headers: Final = super().validate_environment(
-            headers, model, messages, optional_params, litellm_params, api_key, api_base
+            headers, model, messages, optional_params, litellm_params, dynamic_api_key, api_base
         )
 
-        account_id: Final = self.authenticator.get_account_id()
+        account_id: Final = self.authenticator.get_account_id(dynamic_api_key)
         session_id: Final = ensure_chatgpt_session_id(litellm_params)
-        default_headers: Final = get_chatgpt_default_headers(api_key or "", account_id, session_id)
+        default_headers: Final = get_chatgpt_default_headers(dynamic_api_key, account_id, session_id)
         return {**default_headers, **validated_headers}
+
+    def _resolve_access_token(self, api_key: str | None, model: str) -> str:
+        if api_key:
+            return api_key
+        try:
+            return self.authenticator.get_access_token()
+        except GetAccessTokenError as e:
+            raise AuthenticationError(
+                model=model,
+                llm_provider="chatgpt",
+                message=str(e),
+            )
 
     def post_stream_processing(self, stream: Any) -> Any:
         return ChatGPTToolCallNormalizer(stream)

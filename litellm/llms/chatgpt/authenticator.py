@@ -41,12 +41,18 @@ def _optional_str(value: JsonValue | None) -> str | None:
 
 
 class Authenticator:
-    def __init__(self) -> None:
-        self.token_dir = os.getenv(
+    def __init__(self, auth_file: str | None = None) -> None:
+        configured_token_dir: Final = os.getenv(
             "CHATGPT_TOKEN_DIR",
             os.path.expanduser("~/.config/litellm/chatgpt"),
         )
-        self.auth_file = os.path.join(self.token_dir, os.getenv("CHATGPT_AUTH_FILE", "auth.json"))
+        configured_auth_file: Final = os.path.expanduser(auth_file or os.getenv("CHATGPT_AUTH_FILE", "auth.json"))
+        self.auth_file = (
+            configured_auth_file
+            if os.path.isabs(configured_auth_file)
+            else os.path.join(configured_token_dir, configured_auth_file)
+        )
+        self.token_dir = os.path.dirname(self.auth_file)
         self._ensure_token_dir()
 
     def get_api_base(self) -> str:
@@ -75,7 +81,9 @@ class Authenticator:
         tokens: Final = self._login_device_code()
         return tokens["access_token"]
 
-    def get_account_id(self) -> str | None:
+    def get_account_id(self, token: str | None = None) -> str | None:
+        if token:
+            return self._extract_account_id(token)
         auth_data: Final = self._read_auth_file()
         if not auth_data:
             return None
@@ -336,7 +344,19 @@ class Authenticator:
             "refresh_token": _optional_str(data.get("refresh_token")) or refresh_token,
             "id_token": id_token,
         }
-        auth_data: Final = self._build_auth_record(refreshed)
+        auth_data: Final = self._read_auth_file() or {}
+        auth_data.update(
+            {
+                "access_token": refreshed["access_token"],
+                "refresh_token": refreshed["refresh_token"],
+                "id_token": refreshed["id_token"],
+                "expires_at": self._get_expires_at(refreshed["access_token"]),
+            }
+        )
+        if not auth_data.get("account_id"):
+            auth_data["account_id"] = self._extract_account_id(
+                refreshed["id_token"] or refreshed["access_token"]
+            )
         self._write_auth_file(auth_data)
         return refreshed
 
