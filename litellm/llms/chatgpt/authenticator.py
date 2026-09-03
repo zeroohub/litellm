@@ -354,9 +354,7 @@ class Authenticator:
             }
         )
         if not auth_data.get("account_id"):
-            auth_data["account_id"] = self._extract_account_id(
-                refreshed["id_token"] or refreshed["access_token"]
-            )
+            auth_data["account_id"] = self._extract_account_id(refreshed["id_token"] or refreshed["access_token"])
         self._write_auth_file(auth_data)
         return refreshed
 

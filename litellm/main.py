@@ -100,6 +100,7 @@ from litellm.litellm_core_utils.mock_functions import (
     mock_embedding,
     mock_image_generation,
 )
+from litellm.litellm_core_utils.outbound_proxy import get_current_outbound_proxy_reference
 from litellm.litellm_core_utils.prompt_templates.common_utils import (
     get_content_from_model_response,
 )
@@ -2429,7 +2430,10 @@ def _complete_aiohttp_openai(
 
     if extra_headers is not None:
         optional_params["extra_headers"] = extra_headers
-    return base_llm_aiohttp_handler.completion(
+    completion_handler: Final = (
+        base_llm_http_handler if get_current_outbound_proxy_reference() is not None else base_llm_aiohttp_handler
+    )
+    return completion_handler.completion(
         model=model,
         messages=messages,
         headers=headers,

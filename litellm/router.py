@@ -88,6 +88,10 @@ from litellm.litellm_core_utils.get_llm_provider_logic import (
 )
 from litellm.litellm_core_utils.litellm_logging import Logging as LiteLLMLogging
 from litellm.litellm_core_utils.llm_cost_calc.utils import SERVICE_TIER_COST_KEY_SUFFIXES
+from litellm.litellm_core_utils.outbound_proxy import (
+    OUTBOUND_PROXY_REF_PARAM,
+    set_current_outbound_proxy_reference,
+)
 from litellm.litellm_core_utils.ptu_pricing import (
     PTU_COST_ATTRIBUTION_ENV_VAR,
     declares_ptu,
@@ -2446,6 +2450,7 @@ class Router:
         try:
             _deployment_copy: Final = copy.deepcopy(deployment)
             litellm_params: Final[dict] = _deployment_copy["litellm_params"]
+            litellm_params.pop(OUTBOUND_PROXY_REF_PARAM, None)
 
             if litellm.redact_user_api_key_info:
                 masker: Final = SensitiveDataMasker(visible_prefix=2, visible_suffix=0)
@@ -4006,6 +4011,7 @@ class Router:
         ):
             kwargs.pop(key, None)
         self._merge_tools_from_deployment(deployment=deployment, kwargs=kwargs)
+        set_current_outbound_proxy_reference(deployment["litellm_params"].get(OUTBOUND_PROXY_REF_PARAM))
 
         model_info = deployment.get("model_info", {}).copy()
         deployment_litellm_model_name = deployment["litellm_params"]["model"]

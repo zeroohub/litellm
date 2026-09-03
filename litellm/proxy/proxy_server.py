@@ -322,6 +322,13 @@ from litellm.litellm_core_utils.core_helpers import (
 )
 from litellm.litellm_core_utils.credential_accessor import CredentialAccessor
 from litellm.litellm_core_utils.litellm_logging import Logging as LiteLLMLoggingObj
+from litellm.litellm_core_utils.outbound_proxy import (
+    OUTBOUND_PROXY_PARAM,
+    OUTBOUND_PROXY_REF_PARAM,
+    SUPPORTED_OUTBOUND_PROXY_PROVIDERS,
+    OutboundProxyConfigError,
+    register_outbound_proxy,
+)
 from litellm.litellm_core_utils.realtime_errors import (
     close_after_upstream_handshake_refusal,
     realtime_error_event,
@@ -5180,6 +5187,54 @@ def _websearch_handler_params(stored: Mapping[str, object]) -> dict[str, object]
     return params
 
 
+def _validate_outbound_proxy_mapping_entry(key: object, nested_value: object, path: tuple[object, ...]) -> None:
+    nested_path: Final = (*path, key)
+    if key == OUTBOUND_PROXY_REF_PARAM:
+        raise OutboundProxyConfigError(f"{OUTBOUND_PROXY_REF_PARAM} is reserved for LiteLLM")
+    if key == OUTBOUND_PROXY_PARAM and not (
+        len(nested_path) == 4
+        and nested_path[0] == "model_list"
+        and isinstance(nested_path[1], int)
+        and nested_path[2] == "litellm_params"
+    ):
+        raise OutboundProxyConfigError("outbound_proxy is only valid inside model_list[].litellm_params")
+    _validate_outbound_proxy_location(nested_value, nested_path)
+
+
+def _validate_outbound_proxy_location(value: object, path: tuple[object, ...] = ()) -> None:
+    if isinstance(value, dict):
+        for key, nested_value in value.items():
+            _validate_outbound_proxy_mapping_entry(key, nested_value, path)
+        return
+    if isinstance(value, list):
+        for index, nested_value in enumerate(value):
+            _validate_outbound_proxy_location(nested_value, (*path, index))
+
+
+def _prepare_outbound_proxy_deployment(deployment: object) -> None:
+    from litellm.litellm_core_utils.get_llm_provider_logic import get_llm_provider
+
+    if not isinstance(deployment, dict):
+        return
+    litellm_params: Final = deployment.get("litellm_params")
+    if not isinstance(litellm_params, dict) or OUTBOUND_PROXY_PARAM not in litellm_params:
+        return
+    model: Final = litellm_params.get("model")
+    if not isinstance(model, str) or not model:
+        raise OutboundProxyConfigError("outbound_proxy requires a model deployment with a model")
+    if model.startswith("azure/"):
+        raise OutboundProxyConfigError("outbound_proxy is not supported for provider 'azure'")
+    custom_provider: Final = litellm_params.get("custom_llm_provider")
+    _, provider, _, _ = get_llm_provider(
+        model=model,
+        custom_llm_provider=custom_provider if isinstance(custom_provider, str) else None,
+    )
+    if provider not in SUPPORTED_OUTBOUND_PROXY_PROVIDERS:
+        raise OutboundProxyConfigError(f"outbound_proxy is not supported for provider {provider!r}")
+    proxy_reference: Final = register_outbound_proxy(litellm_params.pop(OUTBOUND_PROXY_PARAM))
+    litellm_params[OUTBOUND_PROXY_REF_PARAM] = proxy_reference
+
+
 def should_load_db_object(object_type: str | SupportedDBObjectType) -> bool:
     """
     Check if an object type should be loaded from the database based on general_settings.supported_db_objects.
@@ -5539,7 +5594,30 @@ class ProxyConfig:
 
         return await resolve_includes(config=config, location=config_file_path, resolve=resolve, read=read_included)
 
+    def _prepare_outbound_proxies(self, config: dict) -> dict:
+        _validate_outbound_proxy_location(config)
+        model_list: Final = config.get("model_list", [])
+        if not isinstance(model_list, list):
+            return config
+        for deployment in model_list:
+            _prepare_outbound_proxy_deployment(deployment)
+        return config
+
+    def _reject_untrusted_outbound_proxy_params(self, value: object) -> None:
+        if isinstance(value, dict):
+            if OUTBOUND_PROXY_PARAM in value:
+                raise OutboundProxyConfigError(
+                    "outbound_proxy can only be configured on a model deployment in config.yaml"
+                )
+            for nested_value in value.values():
+                self._reject_untrusted_outbound_proxy_params(nested_value)
+            return
+        if isinstance(value, list):
+            for nested_value in value:
+                self._reject_untrusted_outbound_proxy_params(nested_value)
+
     async def save_config(self, new_config: Mapping[str, object], include_env_vars: bool = False) -> None:
+
         global prisma_client, general_settings, user_config_file_path, store_model_in_db
         if prisma_client is not None and (
             general_settings.get("store_model_in_db", False) is True or store_model_in_db
@@ -6051,6 +6129,7 @@ class ProxyConfig:
             config = await self._get_config_from_file(config_file_path=config_file_path)
 
         self._load_yaml_settings_stores(config)
+        config = self._prepare_outbound_proxies(config)
 
         ## UPDATE CONFIG WITH DB
         if prisma_client is not None and store_model_in_db is True:
@@ -6059,6 +6138,7 @@ class ProxyConfig:
                 prisma_client=prisma_client,
                 store_model_in_db=store_model_in_db,
             )
+            self._reject_untrusted_outbound_proxy_params(config)
 
         config = self._config_with_resolved_settings(config)
 
@@ -7362,6 +7442,8 @@ class ProxyConfig:
         return frozenset(combined_id_list) | kept_config_ids
 
     def _resolve_db_litellm_param(self, key: str, value: object) -> object:
+        if key in {OUTBOUND_PROXY_PARAM, OUTBOUND_PROXY_REF_PARAM}:
+            raise OutboundProxyConfigError("outbound_proxy can only be configured in config.yaml")
         if not isinstance(value, str):
             return value
 

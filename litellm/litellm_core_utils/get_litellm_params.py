@@ -8,6 +8,12 @@ from pydantic import TypeAdapter, ValidationError
 
 from litellm.constants import CONTROL_OPTIONS_KEY
 from litellm.litellm_core_utils.core_helpers import normalize_drop_params
+from litellm.litellm_core_utils.outbound_proxy import (
+    OUTBOUND_PROXY_PARAM,
+    OUTBOUND_PROXY_REF_PARAM,
+    get_current_outbound_proxy_reference,
+    set_current_outbound_proxy_reference,
+)
 from litellm.llms.openai.data_residency import infer_openai_data_residency
 from litellm.types.litellm_params import MAX_CONTROL_INT_DIGITS, ControlOptions
 from litellm.types.router import CustomPricingLiteLLMParams
@@ -31,6 +37,13 @@ AWS_CREDENTIAL_KWARGS_KEYS: Final = frozenset(
 )
 
 PROVIDER_AFFINITY_HEADER_KWARG_KEY: Final = "provider_affinity_header"
+# The per-deployment Rust opt-in.
+RUST_KWARG_KEY: Final = "rust"
+
+# Keys `completion()` forwards from its own kwargs into `get_litellm_params`,
+# which are otherwise invisible to it because that call site passes explicit
+# named arguments rather than `**kwargs`.
+FORWARDED_KWARGS_KEYS: Final = AWS_CREDENTIAL_KWARGS_KEYS | frozenset({RUST_KWARG_KEY, OUTBOUND_PROXY_REF_PARAM})
 
 # Pre-define optional kwargs keys as frozenset for O(1) lookups
 # These are extracted from kwargs only if present, avoiding unnecessary .get() calls
@@ -67,6 +80,11 @@ OPTIONAL_KWARGS_KEYS: Final = (
             "otpm",
             "use_xai_oauth",
             PROVIDER_AFFINITY_HEADER_KWARG_KEY,
+            # The per-deployment Rust opt-in. `all_litellm_params` keeps it out
+            # of the provider body; this keeps it *in* litellm_params, which is
+            # where the chat completions handlers read it from.
+            RUST_KWARG_KEY,
+            OUTBOUND_PROXY_REF_PARAM,
         }
     )
     | AWS_CREDENTIAL_KWARGS_KEYS
@@ -182,6 +200,14 @@ def get_litellm_params(
     litellm_request_debug: bool | None = None,
     **kwargs,
 ) -> dict:
+    if OUTBOUND_PROXY_PARAM in kwargs:
+        raise ValueError("outbound_proxy can only be configured on a model deployment in config.yaml")
+    outbound_proxy_ref: Final = kwargs.get(OUTBOUND_PROXY_REF_PARAM)
+    current_outbound_proxy_ref: Final = get_current_outbound_proxy_reference()
+    if outbound_proxy_ref is None:
+        set_current_outbound_proxy_reference(None)
+    elif outbound_proxy_ref != current_outbound_proxy_ref:
+        raise ValueError(f"{OUTBOUND_PROXY_REF_PARAM} is reserved for LiteLLM")
     _litellm_metadata_dict: Final = litellm_metadata if isinstance(litellm_metadata, dict) else None
     resolved_metadata: Final = _litellm_metadata_dict.copy() if not metadata and _litellm_metadata_dict else metadata
 

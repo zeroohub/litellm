@@ -3965,6 +3965,8 @@ all_litellm_params = [  # rebind-ok: two star imports in litellm/__init__.py re-
     *KWARG_ARTIFACTS,
     *StandardCallbackDynamicParams.__annotations__,
     *CustomPricingLiteLLMParams.model_fields,
+    "outbound_proxy",
+    "_outbound_proxy_ref",
 ]
 
 

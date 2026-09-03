@@ -26,6 +26,11 @@ if TYPE_CHECKING:
     from aiohttp import ClientSession
 
 import litellm
+from litellm.litellm_core_utils.outbound_proxy import (
+    get_current_outbound_proxy_reference,
+    outbound_proxy_fingerprint,
+    resolve_outbound_proxy,
+)
 from litellm.litellm_core_utils.token_counter import token_counter
 from litellm.llms.base_llm.chat.transformation import BaseLLMException
 from litellm.llms.custom_httpx.http_handler import (
@@ -271,6 +276,7 @@ class BaseOpenAILLM:
         key_parts: Final = [
             f"hashed_api_key={hashed_api_key}",
             f"is_async={client_initialization_params.get('is_async')}",
+            f"outbound_proxy={outbound_proxy_fingerprint(get_current_outbound_proxy_reference())}",
         ]
 
         LITELLM_CLIENT_SPECIFIC_PARAMS: Final = (
@@ -305,7 +311,9 @@ class BaseOpenAILLM:
     def _get_async_http_client(
         shared_session: Optional["ClientSession"] = None,
     ) -> httpx.AsyncClient | None:
-        if litellm.aclient_session is not None:
+        outbound_proxy_ref: Final = get_current_outbound_proxy_reference()
+        proxy_url: Final = resolve_outbound_proxy(outbound_proxy_ref)
+        if proxy_url is None and litellm.aclient_session is not None:
             return litellm.aclient_session
 
         if getattr(litellm, "network_mock", False):
@@ -321,6 +329,17 @@ class BaseOpenAILLM:
             shared_session=shared_session,
         )
 
+        if proxy_url is not None:
+            return httpx.AsyncClient(
+                transport=httpx.AsyncHTTPTransport(
+                    proxy=proxy_url,
+                    verify=ssl_config,
+                    local_address="0.0.0.0" if litellm.force_ipv4 else None,
+                ),
+                verify=ssl_config,
+                follow_redirects=True,
+            )
+
         return httpx.AsyncClient(
             verify=ssl_config,
             transport=transport,
@@ -331,7 +350,9 @@ class BaseOpenAILLM:
 
     @staticmethod
     def _get_sync_http_client() -> httpx.Client | None:
-        if litellm.client_session is not None:
+        outbound_proxy_ref: Final = get_current_outbound_proxy_reference()
+        proxy_url: Final = resolve_outbound_proxy(outbound_proxy_ref)
+        if proxy_url is None and litellm.client_session is not None:
             return litellm.client_session
 
         if getattr(litellm, "network_mock", False):
@@ -341,6 +362,17 @@ class BaseOpenAILLM:
 
         # Get unified SSL configuration
         ssl_config: Final = get_ssl_configuration()
+
+        if proxy_url is not None:
+            return httpx.Client(
+                transport=httpx.HTTPTransport(
+                    proxy=proxy_url,
+                    verify=ssl_config,
+                    local_address="0.0.0.0" if litellm.force_ipv4 else None,
+                ),
+                verify=ssl_config,
+                follow_redirects=True,
+            )
 
         return httpx.Client(
             verify=ssl_config,

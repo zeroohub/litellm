@@ -39,6 +39,12 @@ from litellm.constants import (
     HTTP_HANDLER_CONNECT_TIMEOUT_SECONDS,
 )
 from litellm.litellm_core_utils.logging_utils import track_llm_api_timing
+from litellm.litellm_core_utils.outbound_proxy import (
+    OUTBOUND_PROXY_REF_PARAM,
+    get_current_outbound_proxy_reference,
+    outbound_proxy_fingerprint,
+    resolve_outbound_proxy,
+)
 from litellm.litellm_core_utils.request_timeout_resolver import (
     get_configured_request_timeout,
 )
@@ -616,6 +622,7 @@ class AsyncHTTPHandler:
         shared_session: Optional["ClientSession"] = None,
         transport: httpx.AsyncBaseTransport | None = None,
         follow_redirects: bool = True,
+        outbound_proxy_ref: str | None = None,
     ):
         self.timeout = timeout
         self.event_hooks = event_hooks
@@ -623,12 +630,14 @@ class AsyncHTTPHandler:
         self.shared_session = shared_session
         self.transport = transport
         self.follow_redirects = follow_redirects
+        self.outbound_proxy_ref = outbound_proxy_ref
         self._owns_client = True
         self._client = self.create_client(
             timeout=timeout,
             event_hooks=event_hooks,
             ssl_verify=ssl_verify,
             shared_session=shared_session,
+            outbound_proxy_ref=outbound_proxy_ref,
         )
         self.client_alias = client_alias
 
@@ -640,6 +649,7 @@ class AsyncHTTPHandler:
                 event_hooks=self.event_hooks,
                 ssl_verify=self.ssl_verify,
                 shared_session=self.shared_session,
+                outbound_proxy_ref=self.outbound_proxy_ref,
             )
         return self._client
 
@@ -654,6 +664,7 @@ class AsyncHTTPHandler:
         event_hooks: Mapping[str, list[Callable[..., object]]] | None,
         ssl_verify: VerifyTypes | None = None,
         shared_session: Optional["ClientSession"] = None,
+        outbound_proxy_ref: str | None = None,
     ) -> httpx.AsyncClient:
         if self.transport is not None:
             return httpx.AsyncClient(
@@ -680,6 +691,7 @@ class AsyncHTTPHandler:
             ssl_context=ssl_config if isinstance(ssl_config, ssl.SSLContext) else None,
             ssl_verify=ssl_config if isinstance(ssl_config, bool) else None,
             shared_session=shared_session,
+            outbound_proxy_ref=outbound_proxy_ref,
         )
 
         # Get default headers (User-Agent, overridable via LITELLM_USER_AGENT)
@@ -835,7 +847,12 @@ class AsyncHTTPHandler:
             return response
         except (httpx.RemoteProtocolError, httpx.ConnectError):
             # Retry the request with a new session if there is a connection error
-            new_client: Final = self.create_client(timeout=timeout, event_hooks=self.event_hooks)
+            new_client: Final = self.create_client(
+                timeout=timeout,
+                event_hooks=self.event_hooks,
+                ssl_verify=self.ssl_verify,
+                outbound_proxy_ref=self.outbound_proxy_ref,
+            )
             try:
                 return await self.single_connection_post_request(
                     url=url,
@@ -904,7 +921,12 @@ class AsyncHTTPHandler:
             return response
         except (httpx.RemoteProtocolError, httpx.ConnectError):
             # Retry the request with a new session if there is a connection error
-            new_client: Final = self.create_client(timeout=timeout, event_hooks=self.event_hooks)
+            new_client: Final = self.create_client(
+                timeout=timeout,
+                event_hooks=self.event_hooks,
+                ssl_verify=self.ssl_verify,
+                outbound_proxy_ref=self.outbound_proxy_ref,
+            )
             try:
                 retry_data, retry_content = _prepare_request_data_and_content(data, content)
                 retry: Final = new_client.build_request(
@@ -976,7 +998,12 @@ class AsyncHTTPHandler:
             return response
         except (httpx.RemoteProtocolError, httpx.ConnectError):
             # Retry the request with a new session if there is a connection error
-            new_client: Final = self.create_client(timeout=timeout, event_hooks=self.event_hooks)
+            new_client: Final = self.create_client(
+                timeout=timeout,
+                event_hooks=self.event_hooks,
+                ssl_verify=self.ssl_verify,
+                outbound_proxy_ref=self.outbound_proxy_ref,
+            )
             try:
                 return await self.single_connection_post_request(
                     url=url,
@@ -1043,7 +1070,12 @@ class AsyncHTTPHandler:
             return response
         except (httpx.RemoteProtocolError, httpx.ConnectError):
             # Retry the request with a new session if there is a connection error
-            new_client: Final = self.create_client(timeout=timeout, event_hooks=self.event_hooks)
+            new_client: Final = self.create_client(
+                timeout=timeout,
+                event_hooks=self.event_hooks,
+                ssl_verify=self.ssl_verify,
+                outbound_proxy_ref=self.outbound_proxy_ref,
+            )
             try:
                 return await self.single_connection_post_request(
                     url=url,
@@ -1179,6 +1211,7 @@ class AsyncHTTPHandler:
         ssl_context: ssl.SSLContext | None = None,
         ssl_verify: bool | None = None,
         shared_session: Optional["ClientSession"] = None,
+        outbound_proxy_ref: str | None = None,
     ) -> LiteLLMAiohttpTransport | AsyncHTTPTransport | None:
         """
         - Creates a transport for httpx.AsyncClient
@@ -1194,6 +1227,15 @@ class AsyncHTTPHandler:
         - Why force ipv4?
             - Some users have seen httpx ConnectionError when using ipv6 - forcing ipv4 resolves the issue for them
         """
+        proxy_url: Final = resolve_outbound_proxy(outbound_proxy_ref)
+        if proxy_url is not None:
+            verify: Final[ssl.SSLContext | bool | None] = ssl_context if ssl_context is not None else ssl_verify
+            return AsyncHTTPTransport(
+                proxy=proxy_url,
+                verify=verify,
+                local_address="0.0.0.0" if litellm.force_ipv4 else None,
+            )
+
         #########################################################
         # AIOHTTP TRANSPORT is off by default
         #########################################################
@@ -1380,11 +1422,13 @@ class HTTPHandler:
         concurrent_limit=None,  # Kept for backward compatibility, but ignored (no limits)
         client: httpx.Client | None = None,
         ssl_verify: bool | str | None = None,
+        outbound_proxy_ref: str | None = None,
         disable_default_headers: bool
         | None = False,  # arize phoenix returns different API responses when user agent header in request
     ):
         self.timeout = timeout
         self.ssl_verify = ssl_verify
+        self.outbound_proxy_ref = outbound_proxy_ref
         self.disable_default_headers = disable_default_headers
         self._owns_client = client is None
         self._heal_lock = threading.Lock()
@@ -1693,6 +1737,13 @@ class HTTPHandler:
 
         Some users have seen httpx ConnectionError when using ipv6 - forcing ipv4 resolves the issue for them
         """
+        proxy_url: Final = resolve_outbound_proxy(self.outbound_proxy_ref)
+        if proxy_url is not None:
+            return HTTPTransport(
+                proxy=proxy_url,
+                verify=get_ssl_configuration(self.ssl_verify),
+                local_address="0.0.0.0" if litellm.force_ipv4 else None,
+            )
         if litellm.force_ipv4:
             return HTTPTransport(local_address=_IPV4_LOCAL_ADDRESS, http2=http2_enabled())
         else:
@@ -1721,15 +1772,23 @@ def get_async_httpx_client(
 
     Caches the new client and returns it.
     """
+    outbound_proxy_ref: Final = (
+        params.get(OUTBOUND_PROXY_REF_PARAM)
+        if params is not None and OUTBOUND_PROXY_REF_PARAM in params
+        else get_current_outbound_proxy_reference()
+    )
+    proxy_fingerprint: Final = outbound_proxy_fingerprint(outbound_proxy_ref)
     _params_key_name = ""
     if params is not None:
         for key, value in params.items():
+            if key == OUTBOUND_PROXY_REF_PARAM:
+                continue
             try:
                 _params_key_name += f"{key}_{value}"
             except Exception:
                 pass
 
-    _cache_key_name: Final = "async_httpx_client" + _params_key_name + llm_provider
+    _cache_key_name: Final = "async_httpx_client" + _params_key_name + llm_provider + proxy_fingerprint
 
     # Lazily initialize the global in-memory client cache to avoid relying on
     # litellm globals being fully populated during import time.
@@ -1746,13 +1805,17 @@ def get_async_httpx_client(
 
     if params is not None:
         # Filter out params that are only used for cache key, not for AsyncHTTPHandler.__init__
-        handler_params: Final = {k: v for k, v in params.items() if k != "disable_aiohttp_transport"}
+        handler_params: Final = {
+            k: v for k, v in params.items() if k not in {"disable_aiohttp_transport", OUTBOUND_PROXY_REF_PARAM}
+        }
         handler_params["shared_session"] = shared_session
+        handler_params["outbound_proxy_ref"] = outbound_proxy_ref
         _new_client = AsyncHTTPHandler(**handler_params)
     else:
         _new_client = AsyncHTTPHandler(
             timeout=_default_cached_client_timeout(),
             shared_session=shared_session,
+            outbound_proxy_ref=outbound_proxy_ref,
         )
 
     cache.set_cache(
@@ -1771,15 +1834,23 @@ def _get_httpx_client(params: dict | None = None) -> HTTPHandler:
 
     Caches the new client and returns it.
     """
+    outbound_proxy_ref: Final = (
+        params.get(OUTBOUND_PROXY_REF_PARAM)
+        if params is not None and OUTBOUND_PROXY_REF_PARAM in params
+        else get_current_outbound_proxy_reference()
+    )
+    proxy_fingerprint: Final = outbound_proxy_fingerprint(outbound_proxy_ref)
     _params_key_name = ""
     if params is not None:
         for key, value in params.items():
+            if key == OUTBOUND_PROXY_REF_PARAM:
+                continue
             try:
                 _params_key_name += f"{key}_{value}"
             except Exception:
                 pass
 
-    _cache_key_name: Final = "httpx_client" + _params_key_name
+    _cache_key_name: Final = "httpx_client" + _params_key_name + proxy_fingerprint
 
     # Lazily initialize the global in-memory client cache to avoid relying on
     # litellm globals being fully populated during import time.
@@ -1796,10 +1867,16 @@ def _get_httpx_client(params: dict | None = None) -> HTTPHandler:
 
     if params is not None:
         # Filter out params that are only used for cache key, not for HTTPHandler.__init__
-        handler_params: Final = {k: v for k, v in params.items() if k != "disable_aiohttp_transport"}
+        handler_params: Final = {
+            k: v for k, v in params.items() if k not in {"disable_aiohttp_transport", OUTBOUND_PROXY_REF_PARAM}
+        }
+        handler_params["outbound_proxy_ref"] = outbound_proxy_ref
         _new_client = HTTPHandler(**handler_params)
     else:
-        _new_client = HTTPHandler(timeout=_default_cached_client_timeout())
+        _new_client = HTTPHandler(
+            timeout=_default_cached_client_timeout(),
+            outbound_proxy_ref=outbound_proxy_ref,
+        )
 
     cache.set_cache(
         key=_cache_key_name,
