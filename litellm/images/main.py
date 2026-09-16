@@ -372,6 +372,7 @@ def image_generation(
         # Providers using llm_http_handler
         #########################################################
         elif custom_llm_provider in (
+            litellm.LlmProviders.CHATGPT,
             litellm.LlmProviders.RECRAFT,
             litellm.LlmProviders.AIML,
             litellm.LlmProviders.GEMINI,
@@ -403,6 +404,7 @@ def image_generation(
                 logging_obj=litellm_logging_obj,
                 timeout=timeout,
                 client=client,
+                _is_async=aimg_generation,
             )
         elif custom_llm_provider == "black_forest_labs":
             # Route to BFL-specific handler (polling required)

@@ -4,10 +4,11 @@ from litellm.exceptions import AuthenticationError
 from litellm.llms.openai.openai import OpenAIConfig
 from litellm.types.llms.openai import AllMessageValues
 
-from ..authenticator import Authenticator
+from ..authenticator import resolve_chatgpt_credentials
 from ..common_utils import (
-    GetAccessTokenError,
+    ChatGPTAuthError,
     ensure_chatgpt_session_id,
+    get_chatgpt_api_base,
     get_chatgpt_default_headers,
 )
 from .streaming_utils import ChatGPTToolCallNormalizer
@@ -21,7 +22,6 @@ class ChatGPTConfig(OpenAIConfig):
         custom_llm_provider: str = "openai",
     ) -> None:
         super().__init__()
-        self.authenticator = Authenticator()
 
     def api_base_without_login(self) -> str:
         return self.authenticator.get_api_base()
@@ -33,19 +33,7 @@ class ChatGPTConfig(OpenAIConfig):
         api_key: str | None,
         custom_llm_provider: str,
     ) -> tuple[str | None, str | None, str]:
-        dynamic_api_base: Final = self.authenticator.get_api_base()
-        if api_key is None:
-            return dynamic_api_base, None, custom_llm_provider
-        authenticator: Final = Authenticator(auth_file=api_key)
-        try:
-            dynamic_api_key: Final = authenticator.get_access_token()
-        except GetAccessTokenError as e:
-            raise AuthenticationError(
-                model=model,
-                llm_provider=custom_llm_provider,
-                message=str(e),
-            )
-        return dynamic_api_base, dynamic_api_key, custom_llm_provider
+        return api_base or get_chatgpt_api_base(), api_key, custom_llm_provider
 
     def validate_environment(
         self,
@@ -57,27 +45,25 @@ class ChatGPTConfig(OpenAIConfig):
         api_key: str | None = None,
         api_base: str | None = None,
     ) -> dict:
-        dynamic_api_key: Final = self._resolve_access_token(api_key=api_key, model=model)
+        access_token, account_id = self._resolve_credentials(api_key=api_key, model=model)
         validated_headers: Final = super().validate_environment(
-            headers, model, messages, optional_params, litellm_params, dynamic_api_key, api_base
+            headers, model, messages, optional_params, litellm_params, access_token, api_base
         )
 
-        account_id: Final = self.authenticator.get_account_id(dynamic_api_key)
         session_id: Final = ensure_chatgpt_session_id(litellm_params)
-        default_headers: Final = get_chatgpt_default_headers(dynamic_api_key, account_id, session_id)
+        default_headers: Final = get_chatgpt_default_headers(access_token, account_id, session_id)
         return {**default_headers, **validated_headers}
 
-    def _resolve_access_token(self, api_key: str | None, model: str) -> str:
-        if api_key:
-            return api_key
+    def _resolve_credentials(self, api_key: str | None, model: str) -> tuple[str, str | None]:
         try:
-            return self.authenticator.get_access_token()
-        except GetAccessTokenError as e:
+            credentials: Final = resolve_chatgpt_credentials(api_key)
+        except ChatGPTAuthError as e:
             raise AuthenticationError(
                 model=model,
                 llm_provider="chatgpt",
                 message=str(e),
             )
+        return credentials.access_token, credentials.account_id
 
     def post_stream_processing(self, stream: Any) -> Any:
         return ChatGPTToolCallNormalizer(stream)

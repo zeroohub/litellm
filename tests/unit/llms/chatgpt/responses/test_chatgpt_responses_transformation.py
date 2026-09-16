@@ -6,6 +6,7 @@ Source: litellm/llms/chatgpt/responses/transformation.py
 
 import json
 from collections.abc import Generator
+import time
 from unittest.mock import MagicMock, patch
 
 import httpx
@@ -55,7 +56,6 @@ class TestChatGPTResponsesAPITransformation:
         assert isinstance(config, ChatGPTResponsesAPIConfig)
         assert config.custom_llm_provider == LlmProviders.CHATGPT
 
-
     @pytest.mark.parametrize(
         "model_name",
         [
@@ -81,12 +81,8 @@ class TestChatGPTResponsesAPITransformation:
         assert model_info["mode"] == "responses"
         assert resolved_model == model_name
 
-    @patch("litellm.llms.chatgpt.responses.transformation.Authenticator")
-    def test_chatgpt_responses_endpoint_url(self, mock_authenticator_class):
-        mock_auth_instance = MagicMock()
-        mock_auth_instance.get_api_base.return_value = "https://chatgpt.example.com"
-        mock_authenticator_class.return_value = mock_auth_instance
-
+    def test_chatgpt_responses_endpoint_url(self, monkeypatch):
+        monkeypatch.setenv("CHATGPT_API_BASE", "https://chatgpt.example.com")
         config = ChatGPTResponsesAPIConfig()
 
         url = config.get_complete_url(api_base=None, litellm_params={})
@@ -102,15 +98,19 @@ class TestChatGPTResponsesAPITransformation:
         )
         assert url_with_slash == "https://chatgpt.example.com/responses"
 
-    @patch("litellm.llms.chatgpt.responses.transformation.Authenticator")
-    def test_validate_environment_headers(self, mock_authenticator_class):
-        mock_auth_instance = MagicMock()
-        mock_auth_instance.get_access_token.return_value = "access-123"
-        mock_auth_instance.get_account_id.return_value = "acct-123"
-        mock_authenticator_class.return_value = mock_auth_instance
-
+    def test_validate_environment_headers(self, tmp_path):
+        auth_file = tmp_path / "auth.js"
+        auth_file.write_text(
+            json.dumps(
+                {
+                    "access_token": "access-123",
+                    "account_id": "acct-123",
+                    "expires_at": time.time() + 3600,
+                }
+            )
+        )
         config = ChatGPTResponsesAPIConfig()
-        litellm_params = GenericLiteLLMParams(litellm_session_id="session-123")
+        litellm_params = GenericLiteLLMParams(api_key=str(auth_file), litellm_session_id="session-123")
         headers = config.validate_environment(
             headers={"originator": "custom-origin"},
             model="gpt-5.2",

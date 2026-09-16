@@ -5,7 +5,7 @@ from unittest.mock import mock_open, patch
 
 import pytest
 
-from litellm.llms.chatgpt.authenticator import Authenticator
+from litellm.llms.chatgpt.authenticator import Authenticator, resolve_chatgpt_credentials
 from litellm.llms.chatgpt.chat.transformation import ChatGPTConfig
 from litellm.llms.chatgpt.responses.transformation import ChatGPTResponsesAPIConfig
 from litellm.types.router import GenericLiteLLMParams
@@ -101,7 +101,7 @@ class TestChatGPTAuthenticator:
         auth_file.write_text(json.dumps({"access_token": access_token, "expires_at": time.time() + 3600}))
         config = ChatGPTConfig()
 
-        _, dynamic_api_key, _ = config._get_openai_compatible_provider_info(
+        _, configured_api_key, _ = config._get_openai_compatible_provider_info(
             model="gpt-5.4",
             api_base=None,
             api_key="account-a/auth.json",
@@ -113,10 +113,10 @@ class TestChatGPTAuthenticator:
             messages=[],
             optional_params={},
             litellm_params={},
-            api_key=dynamic_api_key,
+            api_key=configured_api_key,
         )
 
-        assert dynamic_api_key == access_token
+        assert configured_api_key == "account-a/auth.json"
         assert headers["Authorization"] == f"Bearer {access_token}"
         assert headers["ChatGPT-Account-Id"] == "acct-a"
 
@@ -189,3 +189,72 @@ class TestChatGPTAuthenticator:
         assert account_a_headers["ChatGPT-Account-Id"] == "acct-a"
         assert account_b_headers["Authorization"] == f"Bearer {account_tokens['account-b']}"
         assert account_b_headers["ChatGPT-Account-Id"] == "acct-b"
+
+    @pytest.mark.parametrize("filename", ["auth.js", "credentials.custom"])
+    def test_resolver_accepts_arbitrary_auth_file_extensions(self, tmp_path, monkeypatch, filename):
+        monkeypatch.setenv("CHATGPT_TOKEN_DIR", str(tmp_path))
+        auth_file = tmp_path / filename
+        auth_file.write_text(
+            json.dumps(
+                {
+                    "access_token": "selected-token",
+                    "expires_at": time.time() + 3600,
+                    "account_id": "selected-account",
+                }
+            )
+        )
+
+        credentials = resolve_chatgpt_credentials(filename)
+
+        assert credentials.access_token == "selected-token"
+        assert credentials.account_id == "selected-account"
+
+    def test_explicit_auth_file_does_not_read_or_create_legacy_auth_file(self, tmp_path, monkeypatch):
+        selected_auth_file = tmp_path / "selected" / "auth.js"
+        legacy_auth_file = tmp_path / "legacy" / "auth.js"
+        selected_auth_file.parent.mkdir()
+        selected_auth_file.write_text(
+            json.dumps(
+                {
+                    "access_token": "selected-token",
+                    "expires_at": time.time() + 3600,
+                    "account_id": "selected-account",
+                }
+            )
+        )
+        monkeypatch.setenv("CHATGPT_AUTH_FILE", str(legacy_auth_file))
+
+        credentials = resolve_chatgpt_credentials(str(selected_auth_file))
+
+        assert credentials.access_token == "selected-token"
+        assert credentials.account_id == "selected-account"
+        assert not legacy_auth_file.exists()
+        assert not legacy_auth_file.parent.exists()
+
+    def test_resolver_accepts_raw_access_token_and_extracts_account_id(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CHATGPT_TOKEN_DIR", str(tmp_path))
+        access_token = _make_jwt({"https://api.openai.com/auth": {"chatgpt_account_id": "raw-token-account"}})
+
+        credentials = resolve_chatgpt_credentials(access_token)
+
+        assert credentials.access_token == access_token
+        assert credentials.account_id == "raw-token-account"
+        assert not any(tmp_path.iterdir())
+
+    def test_resolver_uses_legacy_fallback_when_deployment_key_is_omitted(self, tmp_path, monkeypatch):
+        auth_file = tmp_path / "legacy.json"
+        auth_file.write_text(
+            json.dumps(
+                {
+                    "access_token": "legacy-token",
+                    "expires_at": time.time() + 3600,
+                    "account_id": "legacy-account",
+                }
+            )
+        )
+        monkeypatch.setenv("CHATGPT_AUTH_FILE", str(auth_file))
+
+        credentials = resolve_chatgpt_credentials(None)
+
+        assert credentials.access_token == "legacy-token"
+        assert credentials.account_id == "legacy-account"

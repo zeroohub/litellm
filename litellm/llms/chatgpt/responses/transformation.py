@@ -23,11 +23,11 @@ from litellm.types.llms.openai import (
 from litellm.types.router import GenericLiteLLMParams
 from litellm.types.utils import LlmProviders
 
-from ..authenticator import Authenticator
+from ..authenticator import resolve_chatgpt_credentials
 from ..common_utils import (
-    CHATGPT_API_BASE,
-    GetAccessTokenError,
+    ChatGPTAuthError,
     ensure_chatgpt_session_id,
+    get_chatgpt_api_base,
     get_chatgpt_default_headers,
     get_chatgpt_default_instructions,
 )
@@ -39,7 +39,6 @@ if TYPE_CHECKING:
 class ChatGPTResponsesAPIConfig(OpenAIResponsesAPIConfig):
     def __init__(self) -> None:
         super().__init__()
-        self.authenticator = Authenticator()
 
     @property
     def custom_llm_provider(self) -> LlmProviders:
@@ -58,19 +57,15 @@ class ChatGPTResponsesAPIConfig(OpenAIResponsesAPIConfig):
         return {**default_headers, **headers}
 
     def _resolve_credentials(self, configured_api_key: str | None, model: str) -> tuple[str, str | None]:
-        if configured_api_key and not configured_api_key.endswith(".json"):
-            account_id: Final = self.authenticator.get_account_id(configured_api_key)
-            return configured_api_key, account_id
-        authenticator: Final = Authenticator(auth_file=configured_api_key)
         try:
-            access_token: Final = authenticator.get_access_token()
-        except GetAccessTokenError as e:
+            credentials: Final = resolve_chatgpt_credentials(configured_api_key)
+        except ChatGPTAuthError as e:
             raise AuthenticationError(
                 model=model,
                 llm_provider="chatgpt",
                 message=str(e),
             )
-        return access_token, authenticator.get_account_id()
+        return credentials.access_token, credentials.account_id
 
     def transform_responses_api_request(
         self,
@@ -248,7 +243,7 @@ class ChatGPTResponsesAPIConfig(OpenAIResponsesAPIConfig):
         api_base: str | None,
         litellm_params: dict,
     ) -> str:
-        api_base = api_base or self.authenticator.get_api_base() or CHATGPT_API_BASE
+        api_base = api_base or get_chatgpt_api_base()
         api_base = api_base.rstrip("/")
         return f"{api_base}/responses"
 

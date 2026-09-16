@@ -210,6 +210,10 @@ def get_chatgpt_originator() -> str:
     return _safe_header_value(originator) or DEFAULT_ORIGINATOR
 
 
+def get_chatgpt_api_base() -> str:
+    return os.getenv("CHATGPT_API_BASE") or os.getenv("OPENAI_CHATGPT_API_BASE") or CHATGPT_API_BASE
+
+
 def get_chatgpt_user_agent(originator: str) -> str:
     override: Final = os.getenv("CHATGPT_USER_AGENT")
     if override:
@@ -229,7 +233,7 @@ def get_chatgpt_default_headers(
     access_token: str,
     account_id: str | None,
     session_id: str | None = None,
-) -> dict:
+) -> dict[str, str]:
     originator: Final = get_chatgpt_originator()
     user_agent: Final = get_chatgpt_user_agent(originator)
     headers: Final = {

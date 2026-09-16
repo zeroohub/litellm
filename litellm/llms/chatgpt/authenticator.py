@@ -3,6 +3,8 @@ import json
 import os
 import time
 from collections.abc import Mapping
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Final, TypeAlias
 
 import httpx
@@ -36,6 +38,12 @@ JsonObject: TypeAlias = Mapping[str, JsonValue]
 _JSON_OBJECT_ADAPTER: Final = TypeAdapter(JsonObject)
 
 
+@dataclass(frozen=True, slots=True)
+class ChatGPTCredentials:
+    access_token: str
+    account_id: str | None
+
+
 def _optional_str(value: JsonValue | None) -> str | None:
     return value if isinstance(value, str) else None
 
@@ -53,7 +61,6 @@ class Authenticator:
             else os.path.join(configured_token_dir, configured_auth_file)
         )
         self.token_dir = os.path.dirname(self.auth_file)
-        self._ensure_token_dir()
 
     def get_api_base(self) -> str:
         return os.getenv("CHATGPT_API_BASE") or os.getenv("OPENAI_CHATGPT_API_BASE") or CHATGPT_API_BASE
@@ -113,6 +120,7 @@ class Authenticator:
 
     def _write_auth_file(self, data: JsonObject) -> None:
         try:
+            self._ensure_token_dir()
             with open(self.auth_file, "w") as f:
                 json.dump(data, f)
         except OSError as exc:
@@ -402,3 +410,41 @@ class Authenticator:
                 break
             time.sleep(sleep_for)
         return None
+
+
+def _looks_like_access_token(value: str) -> bool:
+    return value.count(".") >= 2 or value.startswith(("sk-", "sess-"))
+
+
+def _is_auth_file_reference(value: str) -> bool:
+    expanded_value: Final = os.path.expanduser(value)
+    configured_token_dir: Final = os.getenv(
+        "CHATGPT_TOKEN_DIR",
+        os.path.expanduser("~/.config/litellm/chatgpt"),
+    )
+    token_dir_candidate: Final = os.path.join(configured_token_dir, expanded_value)
+    return (
+        os.path.isabs(expanded_value)
+        or expanded_value.startswith(".")
+        or "/" in expanded_value
+        or "\\" in expanded_value
+        or os.path.isfile(expanded_value)
+        or os.path.isfile(token_dir_candidate)
+        or (bool(Path(expanded_value).suffix) and not _looks_like_access_token(value))
+    )
+
+
+def resolve_chatgpt_credentials(configured_api_key: str | None) -> ChatGPTCredentials:
+    if configured_api_key is not None and not _is_auth_file_reference(configured_api_key):
+        token_authenticator: Final = Authenticator(auth_file=os.devnull)
+        return ChatGPTCredentials(
+            access_token=configured_api_key,
+            account_id=token_authenticator.get_account_id(configured_api_key),
+        )
+
+    file_authenticator: Final = Authenticator(auth_file=configured_api_key)
+    access_token: Final = file_authenticator.get_access_token()
+    return ChatGPTCredentials(
+        access_token=access_token,
+        account_id=file_authenticator.get_account_id(),
+    )
