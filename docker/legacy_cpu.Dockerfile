@@ -116,8 +116,7 @@ COPY --from=builder /app/enterprise /app/enterprise
 COPY --from=builder /app/litellm-proxy-extras /app/litellm-proxy-extras
 COPY --from=builder /opt/prisma /opt/prisma
 
-RUN find /app/.venv -type f -path "*/tornado/test/*" -delete && \
-    find /app/.venv -type d -path "*/tornado/test" -delete && \
+RUN find /app/.venv -type d -path "*/tornado/test" -prune -exec rm -rf {} + && \
     chmod -R a+rX /opt/prisma && \
     test -x /opt/prisma/binaries/node_modules/.bin/prisma && \
     test -f /opt/prisma/binaries/node_modules/prisma/build/index.js && \
