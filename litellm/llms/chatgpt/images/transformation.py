@@ -104,7 +104,7 @@ class ChatGPTImageGenerationConfig(GPTImageGenerationConfig):
         litellm_params: RequestData,
         stream: bool | None = None,
     ) -> str:
-        return _endpoint_url(api_base, "generations")
+        return _endpoint_url(api_base or litellm_params.get("api_base"), "generations")
 
     def transform_image_generation_request(
         self,
@@ -132,7 +132,7 @@ class ChatGPTImageEditConfig(OpenAIImageEditConfig):
         return _auth_headers(api_key, model, headers)
 
     def get_complete_url(self, model: str, api_base: str | None, litellm_params: RequestData) -> str:
-        return _endpoint_url(api_base, "edits")
+        return _endpoint_url(api_base or litellm_params.get("api_base"), "edits")
 
     def transform_image_edit_request(
         self,

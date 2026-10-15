@@ -4,11 +4,10 @@ from litellm.exceptions import AuthenticationError
 from litellm.llms.openai.openai import OpenAIConfig
 from litellm.types.llms.openai import AllMessageValues
 
-from ..authenticator import resolve_chatgpt_credentials
+from ..authenticator import Authenticator, resolve_chatgpt_credentials
 from ..common_utils import (
     ChatGPTAuthError,
     ensure_chatgpt_session_id,
-    get_chatgpt_api_base,
     get_chatgpt_default_headers,
 )
 from .streaming_utils import ChatGPTToolCallNormalizer
@@ -22,6 +21,7 @@ class ChatGPTConfig(OpenAIConfig):
         custom_llm_provider: str = "openai",
     ) -> None:
         super().__init__()
+        self.authenticator = Authenticator()
 
     def api_base_without_login(self) -> str:
         return self.authenticator.get_api_base()
@@ -33,7 +33,7 @@ class ChatGPTConfig(OpenAIConfig):
         api_key: str | None,
         custom_llm_provider: str,
     ) -> tuple[str | None, str | None, str]:
-        return api_base or get_chatgpt_api_base(), api_key, custom_llm_provider
+        return api_base or self.authenticator.get_api_base(), api_key, custom_llm_provider
 
     def validate_environment(
         self,
