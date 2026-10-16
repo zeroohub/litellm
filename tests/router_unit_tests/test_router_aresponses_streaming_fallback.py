@@ -10,7 +10,8 @@ Targets the four helpers introduced on Router:
   - _aresponses_streaming_iterator
 """
 
-from typing import Any, AsyncIterator, List
+from collections.abc import Mapping, MutableMapping
+from typing import Any, AsyncIterator, Final, List
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -462,8 +463,9 @@ async def test_aresponses_attempt_strips_the_controls_carrier_and_wraps_every_ho
 
 
 @pytest.mark.asyncio
-async def test_aresponses_fallback_on_in_stream_error_event():
-    """A retriable in-stream error event (429) must trigger the router's mid-stream
+@pytest.mark.parametrize("status_code", [429, 500])
+async def test_aresponses_fallback_on_in_stream_error_event(status_code: int):
+    """A retriable in-stream error event must trigger the router's mid-stream
     fallback path: the wrapper catches MidStreamFallbackError raised by the source
     iterator and yields the fallback stream instead of surfacing the error."""
     import json
@@ -478,9 +480,19 @@ async def test_aresponses_fallback_on_in_stream_error_event():
 
     router = _make_router()
 
+    error_fields: Final = (
+        {"type": "tokens", "code": "rate_limit_exceeded", "message": "rate limited"}
+        if status_code == 429
+        else {
+            "type": "server_error",
+            "code": "internal_error",
+            "message": "Our servers are currently overloaded. Please try again later",
+        }
+    )
+
     error_payload = {
         "type": "error",
-        "error": {"type": "tokens", "code": "rate_limit_exceeded", "message": "rate limited"},
+        "error": error_fields,
     }
     sse_bytes = f"data: {json.dumps(error_payload)}\n\n".encode()
 
@@ -497,7 +509,7 @@ async def test_aresponses_fallback_on_in_stream_error_event():
     mock_config.transform_streaming_response.return_value = ErrorEvent(
         type=ResponsesAPIStreamEvents.ERROR,
         sequence_number=0,
-        error=ErrorEventError(type="tokens", code="rate_limit_exceeded", message="rate limited"),
+        error=ErrorEventError(**error_fields),
     )
 
     source = ResponsesAPIStreamingIterator(
@@ -530,7 +542,11 @@ async def test_aresponses_fallback_on_in_stream_error_event():
     ) as mock_fallback:
         wrapped = await router._aresponses_streaming_iterator(
             response=source,
-            initial_kwargs={"model": "primary", "input": "original question"},
+            initial_kwargs={
+                "model": "primary",
+                "input": "original question",
+                "litellm_metadata": {"model_info": {"id": "deployment-a"}},
+            },
         )
         collected = [ev async for ev in wrapped]
 
@@ -538,10 +554,140 @@ async def test_aresponses_fallback_on_in_stream_error_event():
     mock_fallback.assert_awaited_once()
     raised = mock_fallback.await_args.kwargs["e"]
     assert isinstance(raised, MidStreamFallbackError)
-    assert raised.status_code == 429
-    assert isinstance(raised.original_exception, litellm.RateLimitError)
-    assert raised.original_exception.status_code == 429
+    assert raised.status_code == status_code
+    assert raised.failed_deployment_id == "deployment-a"
+    expected_error_type: Final = litellm.RateLimitError if status_code == 429 else litellm.InternalServerError
+    assert isinstance(raised.original_exception, expected_error_type)
+    assert raised.original_exception.status_code == status_code
     assert mock_fallback.await_args.kwargs["kwargs"]["input"] == "original question"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("client_api_key", [None, "tenant-supplied-key"])
+async def test_aresponses_attempt_stamps_selected_deployment_from_stream_snapshot(client_api_key: str | None):
+    from litellm import InternalServerError
+
+    router: Final = _make_router()
+    failure: Final = _mid_stream_failure("openai/gpt-4o-mini")
+    selected_ids: Final[list[object]] = []
+    live_model_info: Final[list[MutableMapping[str, object]]] = []
+
+    async def original(**kwargs: object):
+        model_info: Final = kwargs["model_info"]
+        assert isinstance(model_info, MutableMapping)
+        selected_ids.append(model_info["id"])
+        live_model_info.append(model_info)
+        return _scripted_responses_stream([], failure)
+
+    stream: Final = await router._aresponses_with_streaming_fallbacks(
+        original_function=original,
+        model="primary",
+        stream=True,
+        input="hi",
+        num_retries=0,
+        **({"api_key": client_api_key} if client_api_key is not None else {}),
+    )
+    live_model_info[0]["id"] = "later-mutation"
+    with pytest.raises(InternalServerError, match="stream dropped"):
+        _ = [event async for event in stream]
+
+    assert getattr(failure, "failed_deployment_id", None) == selected_ids[0]
+    assert len(selected_ids) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("metadata_key", ["metadata", "litellm_metadata"])
+@pytest.mark.parametrize("existing_id", [None, "original-deployment"])
+async def test_aresponses_stamps_active_metadata_without_overwriting_existing_id(
+    metadata_key: str, existing_id: str | None
+):
+    from litellm import InternalServerError
+
+    router: Final = _make_router()
+    failure: Final = _mid_stream_failure("openai/test-model")
+    if existing_id is not None:
+        router._set_failed_deployment_id_on_exception(failure, {"model_info": {"id": existing_id}})
+    stream: Final = await router._aresponses_streaming_iterator(
+        response=_scripted_responses_stream([], failure),
+        initial_kwargs={"model": "primary", metadata_key: {"model_info": {"id": "selected-deployment"}}},
+    )
+
+    with pytest.raises(InternalServerError, match="stream dropped"):
+        _ = [event async for event in stream]
+
+    assert getattr(failure, "failed_deployment_id", None) == (existing_id or "selected-deployment")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failures_before_success", [1, 2])
+async def test_aresponses_weighted_failover_excludes_each_failed_stream(failures_before_success: int):
+    router: Final = Router(
+        model_list=[
+            {
+                "model_name": "same-group",
+                "litellm_params": {"model": "openai/test-model", "api_key": "sk-test", "weight": 1},
+                "model_info": {"id": deployment_id},
+            }
+            for deployment_id in ("account-a", "account-b", "account-c")
+        ],
+        num_retries=0,
+        enable_weighted_failover=True,
+        routing_strategy="simple-shuffle",
+    )
+    completed_event: Final = _make_completed_event(1, 1, 2)
+    attempted_ids: Final[list[object]] = []
+
+    async def original(**kwargs: object):
+        model_info: Final = kwargs["model_info"]
+        assert isinstance(model_info, Mapping)
+        attempted_ids.append(model_info["id"])
+        if len(attempted_ids) <= failures_before_success:
+            return _scripted_responses_stream([], _mid_stream_failure("openai/test-model"))
+        return _scripted_responses_stream([completed_event])
+
+    stream: Final = await router._aresponses_with_streaming_fallbacks(
+        original_function=original, model="same-group", stream=True, input="hi"
+    )
+    collected: Final = [event async for event in stream]
+
+    assert collected == [completed_event]
+    assert len(attempted_ids) == failures_before_success + 1
+    assert len(set(attempted_ids)) == len(attempted_ids)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("enabled, expected_attempts", [(True, 2), (False, 1)])
+async def test_aresponses_failed_streams_stop_when_no_failover_is_available(enabled: bool, expected_attempts: int):
+    from litellm import InternalServerError
+
+    router: Final = Router(
+        model_list=[
+            {
+                "model_name": "same-group",
+                "litellm_params": {"model": "openai/test-model", "api_key": "sk-test", "weight": 1},
+                "model_info": {"id": deployment_id},
+            }
+            for deployment_id in ("account-a", "account-b")
+        ],
+        num_retries=0,
+        enable_weighted_failover=enabled,
+    )
+    attempted_ids: Final[list[object]] = []
+
+    async def original(**kwargs: object):
+        model_info: Final = kwargs["model_info"]
+        assert isinstance(model_info, Mapping)
+        attempted_ids.append(model_info["id"])
+        return _scripted_responses_stream([], _mid_stream_failure("openai/test-model"))
+
+    stream: Final = await router._aresponses_with_streaming_fallbacks(
+        original_function=original, model="same-group", stream=True, input="hi"
+    )
+    with pytest.raises(InternalServerError, match="stream dropped"):
+        _ = [event async for event in stream]
+
+    assert len(attempted_ids) == expected_attempts
+    assert len(set(attempted_ids)) == expected_attempts
 
 
 @pytest.mark.asyncio

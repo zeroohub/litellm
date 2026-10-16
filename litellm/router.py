@@ -478,6 +478,16 @@ def _stream_chunks_have_generated_content(chunks: Sequence[ModelResponseStream])
 _NO_SESSION_KWARGS: Final[Mapping[str, Mapping[str, object]]] = MappingProxyType({})
 _SESSION_ADAPTER: Final = TypeAdapter(Mapping[str, object])
 _SILENT_MODEL_ADAPTER: Final = TypeAdapter(str | list[str])
+_RESPONSES_ROUTING_METADATA_ADAPTER: Final = TypeAdapter(Mapping[str, object])
+
+
+def _responses_streaming_model_info(kwargs: Mapping[str, object]) -> Mapping[str, object]:
+    metadata_key: Final = get_metadata_variable_name_from_kwargs(kwargs)
+    try:
+        metadata: Final = _RESPONSES_ROUTING_METADATA_ADAPTER.validate_python(kwargs.get(metadata_key), strict=True)
+        return _RESPONSES_ROUTING_METADATA_ADAPTER.validate_python(metadata.get("model_info"), strict=True)
+    except ValidationError:
+        return MappingProxyType({})
 
 
 def _as_retry_skipped_deployment_ids(value: object) -> tuple[str, ...]:
@@ -3469,6 +3479,7 @@ class Router:
             # see _ageneric_api_call_with_fallbacks. Mirroring that
             # here ensures model_group, model_group_alias, and trace
             # ids land in the same key litellm.aresponses reads from.
+            self._stamp_failed_deployment_id_from_metadata(e, initial_kwargs)
             self._update_kwargs_before_fallbacks(
                 model=model_group,
                 kwargs=initial_kwargs,
@@ -3910,6 +3921,10 @@ class Router:
         # cool down the deployment every other tenant sharing this config relies on.
         effective_model_info: Final = kwargs.get("model_info") or deployment.get("model_info") or MappingProxyType({})
         self._set_failed_deployment_id_on_exception(exception, MappingProxyType({"model_info": effective_model_info}))
+
+    def _stamp_failed_deployment_id_from_metadata(self, exception: Exception, kwargs: Mapping[str, object]) -> None:
+        model_info: Final = _responses_streaming_model_info(kwargs)
+        self._set_failed_deployment_id_on_exception(exception, MappingProxyType({"model_info": model_info}))
 
     @staticmethod
     def _stamp_retry_skip_deployment_id(exception: Exception, kwargs: Mapping[str, object]) -> None:
@@ -5457,6 +5472,11 @@ class Router:
             model=model, original_generic_function=original_generic_function, **kwargs
         )
         carry_over_pre_routing_selection(live_kwargs=kwargs, snapshot=hop_kwargs)
+        metadata_variable_name: Final = get_metadata_variable_name_from_kwargs(kwargs)
+        selected_model_info: Final = _responses_streaming_model_info(kwargs)
+        snapshot_metadata: Final = hop_kwargs.get(metadata_variable_name)
+        if selected_model_info and isinstance(snapshot_metadata, dict):
+            snapshot_metadata["model_info"] = dict(selected_model_info)
         if kwargs.get("stream") and isinstance(response, BaseResponsesAPIStreamingIterator):
             return await self._aresponses_streaming_iterator(response=response, initial_kwargs=hop_kwargs)
         return response
